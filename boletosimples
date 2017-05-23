@@ -1,0 +1,172 @@
+using DotNetOpenAuth.OAuth2;
+using MarketUP_Library_BankSlipManager.Model;
+using MarketUP_Library_BankSlipManager.Provider.Base;
+using Newtonsoft.Json;
+using RestSharp;
+using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Web;
+
+namespace MarketUP_Library_BankSlipManager.Provider
+{
+    public class BoletoSimples : BaseProvider
+    {
+        private const string url = "https://sandbox.boletosimples.com.br/api/v1";
+        private Uri uri;
+        private const string clientId = "";
+        private const string clientSecret = "";
+        private const string token = "";
+        private static readonly AuthorizationServerDescription authorizationServerDescription =
+            new AuthorizationServerDescription
+            {
+                TokenEndpoint = new Uri(string.Format("{0}/oauth2/token", url.ToString())),
+                AuthorizationEndpoint = new Uri(string.Format("{0}/oauth2/authorize", url.ToString()))
+            };
+
+        public BoletoSimples()
+        {
+            uri = new System.Uri(url);
+        }
+
+        public override IAuthorizationState GetToken()
+        {
+            var webServerClient = new WebServerClient(authorizationServerDescription);
+
+            webServerClient.ClientIdentifier = clientId;
+            webServerClient.ClientCredentialApplicator = ClientCredentialApplicator.PostParameter(clientSecret);
+
+            var token = webServerClient.GetClientAccessToken();
+
+            return token;
+        }
+
+        public override void AuthorizeUser()
+        {
+            var webServerClient = new WebServerClient(authorizationServerDescription);
+
+            webServerClient.ClientIdentifier = clientId;
+            webServerClient.ClientCredentialApplicator = ClientCredentialApplicator.PostParameter(clientSecret);
+            string[] scope = { "login", "email", "profile", "business", "write", "read", "webhook", "checkout", "subscription" };
+
+            webServerClient.RequestUserAuthorization(scope, returnTo: new Uri("https://localhost:44327/api/values"));//redirect
+        }
+
+        public override object GetUser(HttpRequestBase req)
+        {
+            var webServerClient = new WebServerClient(authorizationServerDescription);
+            webServerClient.ClientIdentifier = clientId;
+            webServerClient.ClientCredentialApplicator = ClientCredentialApplicator.PostParameter(clientSecret);
+
+            var state = webServerClient.ProcessUserAuthorization(req);
+            if (string.IsNullOrEmpty(state.AccessToken))
+                throw new Exception("Não há token disponível");
+            var path = "userinfo";
+
+            var user = JsonConvert.DeserializeAnonymousType(Request(Method.GET, path, state.AccessToken, null).Content, new { id = 0, email = "", login_url = "", checkout_url = "", application_access_token = "" });
+
+            return new { id = user.id, email = user.email, login_url = user.login_url, checkout_url = user.checkout_url, application_access_token = state.AccessToken };
+        }
+
+        public override object CreateUser(string email)
+        {
+            if (string.IsNullOrEmpty(email))
+                throw new Exception("Informar o e-mail");
+
+            var path = "partner/users";
+            var body = new { user = new { email = email } };
+
+            var user = new { id = 0, email = "", login_url = "", checkout_url = "", application_access_token = "" };
+
+            return JsonConvert.DeserializeAnonymousType(Request(Method.POST, path, token, body).Content, user);
+        }
+
+        public override object CreateBankBillet(BankBillet bankBillet, string token)
+        {
+            if (string.IsNullOrEmpty(token) || bankBillet == null)
+                throw new Exception("Informações faltantes");
+
+            var path = "bank_billets";
+            var body = new { bank_billet = bankBillet.CreateBodyBankBillet() };
+
+            return JsonConvert.DeserializeObject<BankBillet>(Request(Method.POST, path, token, body).Content);
+        }
+
+        public override object CreateDuplicateBankBillet(int id, DateTime? expire_at_in_days, bool? cancel, bool? with_fines, decimal? amount, string token)
+        {
+            if (id == 0 || string.IsNullOrEmpty(token))
+                throw new Exception("Id ou token inválido");
+
+            var path = string.Format("bank_billets/{0}/duplicate", id);
+            var body =
+                new
+                {
+                    id = id,
+                    expire_at_in_days = expire_at_in_days,
+                    cancel = cancel,
+                    with_fines = with_fines,
+                    amount = amount
+                };
+
+            return JsonConvert.DeserializeObject<BankBillet>(Request(Method.POST, path, token, body).Content);
+        }
+
+        public override bool CancelBankBillet(int id, string token)
+        {
+            if (id == 0 || string.IsNullOrEmpty(token))
+                throw new Exception("Id ou token inválido");
+
+            var path = string.Format("bank_billets/{0}/cancel", id);
+
+            var response = Request(Method.PUT, path, token, null);
+
+            if (response.StatusCode != HttpStatusCode.NoContent)
+                return false;
+
+            return true;
+        }
+
+        public override object GetBankBillet(int id, string token)
+        {
+            if (id == 0 || string.IsNullOrEmpty(token))
+                throw new Exception("Id ou token inválido");
+
+            var path = string.Format("bank_billets/{0}", id.ToString());
+
+            return JsonConvert.DeserializeObject<BankBillet>(Request(Method.GET, path, token, null).Content);
+        }
+
+        public override object ListBankBillets(string token)
+        {
+            var path = string.Format("bank_billets");
+
+            return JsonConvert.DeserializeObject<List<BankBillet>>(Request(Method.GET, path, token, null).Content);
+        }
+
+        private IRestResponse Request(Method method, string path, string token, object body = null)
+        {
+            if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(token))
+                throw new Exception("Request inválido");
+            var request = new RestRequest(path, method);
+            request.AddHeader("Accept", "*/*");
+            request.AddHeader("Content-Type", "application/json");
+            request.AddHeader("Authorization", "Bearer " + token);
+            request.RequestFormat = DataFormat.Json;
+            request.Method = method;
+
+            if (body != null)
+                request.AddBody(body);
+
+            var client = new RestClient();
+            client.UserAgent = "MarketUP (ti@marketup.com)";
+            client.BaseUrl = uri;
+
+            IRestResponse response = client.Execute(request);
+
+            if (response.StatusCode == HttpStatusCode.NotFound)
+                throw new Exception("Link inválido");
+
+            return response;
+        }
+    }
+}
